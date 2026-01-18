@@ -1,0 +1,5 @@
+{
+    "dependencies": {
+        "@uswriting/exiftool": "^1"
+    }
+}

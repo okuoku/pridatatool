@@ -27,7 +27,7 @@ Git-LFS管理された写真リポジトリ(`photos.git`)から、全refの履�
 ### 4. Git-LFSファイルの取得
 - Git-LFSポインタファイルからOIDを取得 (正規表現: `^oid sha256:([a-f0-9]{64})`)
 - OIDを使ってGitea LFS APIから直接バイナリを取得
-  - エンドポイント: `https://[gitea-host]/git-lfs/objects/[OID]`
+  - エンドポイント: `https://[gitea-host]/info/lfs/objects/[OID]`
 - 認証: Bearer token (環境変数または引数)
 
 ### 5. 非LFSファイルの処理

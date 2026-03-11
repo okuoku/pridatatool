@@ -63,6 +63,8 @@ function make_reader(gitdir){
     let queuedsize = 0;
     let recv = null;
     let pendingError = null;
+    let locked = false;
+    let releaseCallback = null;
 
     child.stdout.on("data", (dat) => {
         function consumebody(buf){
@@ -123,6 +125,25 @@ function make_reader(gitdir){
     });
 
     return {
+        lock: async function(){
+            return new Promise((resolve) => {
+                if(!locked){
+                    locked = true;
+                    resolve();
+                }else{
+                    releaseCallback = resolve;
+                }
+            });
+        },
+        unlock: function(){
+            if(releaseCallback){
+                const cb = releaseCallback;
+                releaseCallback = null;
+                cb();
+            }else{
+                locked = false;
+            }
+        },
         get: async function(refpath){
             const writedata = refpath + "\n";
             return new Promise((resolve, reject) => {
@@ -145,6 +166,31 @@ function make_reader(gitdir){
             return new Promise((resolve) => {
                 child.stdin.end(() => resolve());
             });
+        }
+    };
+}
+
+function make_reader_pool(gitdir, size){
+    const readers = [];
+    for(let i = 0; i < size; i++){
+        readers.push(make_reader(gitdir));
+    }
+    let current = 0;
+    
+    return {
+        acquire: async function(){
+            const reader = readers[current];
+            current = (current + 1) % readers.length;
+            await reader.lock();
+            return reader;
+        },
+        release: function(reader){
+            reader.unlock();
+        },
+        dispose: async function(){
+            for(const reader of readers){
+                await reader.dispose();
+            }
         }
     };
 }
@@ -301,8 +347,9 @@ async function getCommitHistory(gitdir, ref, baseCommit, sinceSha1){
 }
 
 async function processFile(args){
-    const { gitdir, commit, file, reader, gitea_host, token, processedOids } = args;
+    const { gitdir, commit, file, readerPool, gitea_host, token, processedOids } = args;
     
+    const reader = await readerPool.acquire();
     try{
         const lfsPointer = await getLfsPointerContent(reader, commit, file);
         
@@ -340,13 +387,15 @@ async function processFile(args){
         }
     }catch(e){
         return { error: true, file, message: e.message };
+    }finally{
+        readerPool.release(reader);
     }
     return null;
 }
 
-async function processFilesParallel(gitdir, commit, files, reader, gitea_host, token, processedOids){
+async function processFilesParallel(gitdir, commit, files, readerPool, gitea_host, token, processedOids){
     const tasks = files.map(file => ({
-        gitdir, commit, file, reader, gitea_host, token, processedOids
+        gitdir, commit, file, readerPool, gitea_host, token, processedOids
     }));
     
     const results = [];
@@ -364,7 +413,7 @@ async function processFilesParallel(gitdir, commit, files, reader, gitea_host, t
     return results;
 }
 
-async function processRef(gitdir, ref, commit, reader, gitea_host, token, processedOids, lastProcessedSha1){
+async function processRef(gitdir, ref, commit, readerPool, gitea_host, token, processedOids, lastProcessedSha1){
     console.log(`Processing ref: ${ref} (${commit})`);
     
     const commits = await getCommitHistory(gitdir, ref, commit, lastProcessedSha1);
@@ -385,7 +434,7 @@ async function processRef(gitdir, ref, commit, reader, gitea_host, token, proces
         
         const files = await walkTree(gitdir, commitHash);
         
-        const results = await processFilesParallel(gitdir, commitHash, files, reader, gitea_host, token, processedOids);
+        const results = await processFilesParallel(gitdir, commitHash, files, readerPool, gitea_host, token, processedOids);
         
         totalProcessed += results.filter(r => r?.processed).length;
         totalSkipped += results.filter(r => r?.skipped).length;
@@ -406,7 +455,7 @@ async function main(){
     
     await fs.mkdir(SAVE_DIR, { recursive: true });
     
-    const reader = make_reader(gitdir);
+    const readerPool = make_reader_pool(gitdir, CONCURRENCY);
     const refs = await getAllRefs(gitdir);
     const processedRefs = await loadProcessedRefs();
     const processedOids = await loadProcessedOids();
@@ -421,10 +470,10 @@ async function main(){
             continue;
         }
         
-        await processRef(gitdir, ref, commit, reader, gitea_host, token, processedOids, null);
+        await processRef(gitdir, ref, commit, readerPool, gitea_host, token, processedOids, null);
     }
     
-    await reader.dispose();
+    await readerPool.dispose();
     
     console.log("Done!");
 }

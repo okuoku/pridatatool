@@ -199,7 +199,7 @@ async function getLfsPointerContent(reader, commit, filePath){
 }
 
 async function downloadLfsFile(gitea_host, token, oid){
-    const url = `${gitea_host}/git-lfs/objects/${oid}`;
+    const url = `${gitea_host}/info/lfs/objects/${oid}`;
     
     const response = await fetch(url, {
         headers: {

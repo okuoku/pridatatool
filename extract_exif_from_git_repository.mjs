@@ -177,6 +177,31 @@ async function saveProcessedRef(ref, sha1){
     await fs.appendFile(STATUS_FILE, `${sha1} ${ref}\n`, "utf8");
 }
 
+async function loadProcessedOids(){
+    const processedOids = new Set();
+    try{
+        const entries = await fs.readdir(SAVE_DIR, { withFileTypes: true });
+        for(const dir1 of entries){
+            if(!dir1.isDirectory()) continue;
+            const dir1Path = path.join(SAVE_DIR, dir1.name);
+            const subEntries = await fs.readdir(dir1Path, { withFileTypes: true });
+            for(const dir2 of subEntries){
+                if(!dir2.isDirectory()) continue;
+                const dir2Path = path.join(dir1Path, dir2.name);
+                const files = await fs.readdir(dir2Path);
+                for(const file of files){
+                    if(file.endsWith(".json")){
+                        const oid = file.replace(".json", "");
+                        processedOids.add(oid);
+                    }
+                }
+            }
+        }
+    }catch{
+    }
+    return processedOids;
+}
+
 async function getLfsPointerContent(reader, commit, filePath){
     try{
         const content = await reader.get(commit + ":" + filePath);
@@ -199,7 +224,7 @@ async function getLfsPointerContent(reader, commit, filePath){
 }
 
 async function downloadLfsFile(gitea_host, token, oid){
-    const url = `${gitea_host}/info/lfs/objects/${oid}`;
+    const url = `${gitea_host}/git-lfs/objects/${oid}`;
     
     const response = await fetch(url, {
         headers: {
@@ -384,10 +409,10 @@ async function main(){
     const reader = make_reader(gitdir);
     const refs = await getAllRefs(gitdir);
     const processedRefs = await loadProcessedRefs();
-    const processedOids = new Set();
+    const processedOids = await loadProcessedOids();
     
     console.log(`Found ${Object.keys(refs).length} refs`);
-    console.log(`Already processed: ${processedRefs.size} refs`);
+    console.log(`Already processed: ${processedRefs.size} refs, ${processedOids.size} OIDs`);
     
     for(const [ref, commit] of Object.entries(refs)){
         const lastProcessedSha1 = processedRefs.get(ref);

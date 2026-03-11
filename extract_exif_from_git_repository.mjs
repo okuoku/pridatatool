@@ -3,13 +3,13 @@ import path from "node:path";
 import process from "node:process";
 import crypto from "node:crypto";
 import child_process from "child_process";
-import { extract_exif } from "./extract_exif.mjs";
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".heic", ".raw", ".cr2", ".nef", ".arw", ".dng", ".orf", ".rw2"]);
 
 const STATUS_FILE = "save_status.txt";
 const SAVE_DIR = "save";
-const CONCURRENCY = 8;
+const CONCURRENCY = 16;
+const EXIF_WORKER_COUNT = 8;
 
 function parseArgs(){
     const args = process.argv.slice(2);
@@ -195,6 +195,82 @@ function make_reader_pool(gitdir, size){
     };
 }
 
+function make_exif_worker_pool(size){
+    const workers = [];
+    let currentId = 0;
+    const pending = new Map();
+    
+    for(let i = 0; i < size; i++){
+        const worker = child_process.fork("./extract_exif_worker.mjs", [], { 
+            stdio: ["pipe", "pipe", "inherit", "ipc"] 
+        });
+        
+        worker.on("message", (msg) => {
+            if(!msg || typeof msg !== "object"){
+                return;
+            }
+            if(typeof msg.id !== "number"){
+                return;
+            }
+            const pendingCallback = pending.get(msg.id);
+            if(pendingCallback){
+                pending.delete(msg.id);
+                pendingCallback(msg.error || null, msg.result);
+            }
+        });
+        
+        worker.on("error", (err) => {
+            console.error("Worker error:", err);
+        });
+        
+        worker.on("exit", (code) => {
+            if(code !== 0 && code !== null){
+                console.error("Worker exited with code:", code);
+            }
+        });
+        
+        workers.push(worker);
+    }
+    
+    return {
+        extract: async function(bytes){
+            return new Promise((resolve, reject) => {
+                const id = currentId++;
+                const worker = workers[id % size];
+                
+                const timeout = setTimeout(() => {
+                    if(pending.has(id)){
+                        pending.delete(id);
+                        reject(new Error(`Worker timeout for id ${id}`));
+                    }
+                }, 60000);
+                
+                pending.set(id, (err, result) => {
+                    clearTimeout(timeout);
+                    if(err){
+                        reject(new Error(err));
+                    }else{
+                        resolve(result);
+                    }
+                });
+                
+                if(!bytes || bytes.length === 0){
+                    pending.delete(id);
+                    reject(new Error("Empty bytes provided"));
+                    return;
+                }
+                
+                worker.send({ id, bytes: Array.from(bytes) });
+            });
+        },
+        dispose: function(){
+            for(const worker of workers){
+                worker.kill();
+            }
+        }
+    };
+}
+
 function isImageFile(filename){
     const ext = path.extname(filename).toLowerCase();
     return IMAGE_EXTENSIONS.has(ext);
@@ -347,7 +423,7 @@ async function getCommitHistory(gitdir, ref, baseCommit, sinceSha1){
 }
 
 async function processFile(args){
-    const { gitdir, commit, file, readerPool, gitea_host, token, processedOids } = args;
+    const { gitdir, commit, file, readerPool, exifWorkerPool, gitea_host, token, processedOids } = args;
     
     const reader = await readerPool.acquire();
     try{
@@ -360,7 +436,7 @@ async function processFile(args){
                 if(processedOids.has(hash)){
                     return { skipped: true, file, hash };
                 }
-                const exif = await extract_exif(content);
+                const exif = await exifWorkerPool.extract(content);
                 if(exif){
                     await saveExifData(hash, exif);
                     processedOids.add(hash);
@@ -377,7 +453,7 @@ async function processFile(args){
         const binary = await downloadLfsFile(gitea_host, token, lfsPointer.oid);
         if(binary){
             const bytes = new Uint8Array(binary);
-            const exif = await extract_exif(bytes);
+            const exif = await exifWorkerPool.extract(bytes);
             
             if(exif){
                 await saveExifData(lfsPointer.oid, exif);
@@ -386,6 +462,7 @@ async function processFile(args){
             }
         }
     }catch(e){
+        console.log(e);
         return { error: true, file, message: e.message };
     }finally{
         readerPool.release(reader);
@@ -393,9 +470,9 @@ async function processFile(args){
     return null;
 }
 
-async function processFilesParallel(gitdir, commit, files, readerPool, gitea_host, token, processedOids){
+async function processFilesParallel(gitdir, commit, files, readerPool, exifWorkerPool, gitea_host, token, processedOids){
     const tasks = files.map(file => ({
-        gitdir, commit, file, readerPool, gitea_host, token, processedOids
+        gitdir, commit, file, readerPool, exifWorkerPool, gitea_host, token, processedOids
     }));
     
     const results = [];
@@ -413,7 +490,7 @@ async function processFilesParallel(gitdir, commit, files, readerPool, gitea_hos
     return results;
 }
 
-async function processRef(gitdir, ref, commit, readerPool, gitea_host, token, processedOids, lastProcessedSha1){
+async function processRef(gitdir, ref, commit, readerPool, exifWorkerPool, gitea_host, token, processedOids, lastProcessedSha1){
     console.log(`Processing ref: ${ref} (${commit})`);
     
     const commits = await getCommitHistory(gitdir, ref, commit, lastProcessedSha1);
@@ -434,7 +511,7 @@ async function processRef(gitdir, ref, commit, readerPool, gitea_host, token, pr
         
         const files = await walkTree(gitdir, commitHash);
         
-        const results = await processFilesParallel(gitdir, commitHash, files, readerPool, gitea_host, token, processedOids);
+        const results = await processFilesParallel(gitdir, commitHash, files, readerPool, exifWorkerPool, gitea_host, token, processedOids);
         
         totalProcessed += results.filter(r => r?.processed).length;
         totalSkipped += results.filter(r => r?.skipped).length;
@@ -456,6 +533,7 @@ async function main(){
     await fs.mkdir(SAVE_DIR, { recursive: true });
     
     const readerPool = make_reader_pool(gitdir, CONCURRENCY);
+    const exifWorkerPool = make_exif_worker_pool(EXIF_WORKER_COUNT);
     const refs = await getAllRefs(gitdir);
     const processedRefs = await loadProcessedRefs();
     const processedOids = await loadProcessedOids();
@@ -470,10 +548,11 @@ async function main(){
             continue;
         }
         
-        await processRef(gitdir, ref, commit, readerPool, gitea_host, token, processedOids, null);
+        await processRef(gitdir, ref, commit, readerPool, exifWorkerPool, gitea_host, token, processedOids, null);
     }
     
     await readerPool.dispose();
+    exifWorkerPool.dispose();
     
     console.log("Done!");
 }

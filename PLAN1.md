@@ -13,13 +13,15 @@ Git-LFS管理された写真リポジトリ(`photos.git`)から、全refの履�
 ### 1. 初期化
 - `git show-ref` でref一覧取得
 - `save_status.txt` を読み込み、処理済みref一覧を取得 (差分実行対応)
+- `save/` ディレクトリから既に処理済みのOID一覧を取得
 
 ### 2. 全refのイテレーション
 - 全てのrefを処理対象とする
 - 各refについてコミット履歴を取得
 
 ### 3. コミット履歴の取得
-- `git rev-list --all --format=%H` で全コミットSHAを取得
+- `git rev-list <ref> ^<sha1> --format=%H` で差分コミットSHAを取得
+- 記録されているsha1以降のコミットのみを処理
 - 各コミットについて:
   - `git ls-tree` でツリー内の全ファイルを取得
   - ファイルパスを元に画像判定 (拡張子: .jpg, .jpeg, .png, .heic, .raw, .cr2, .nef, .arw, .dng, .orf, .rw2)
@@ -51,7 +53,11 @@ Git-LFS管理された写真リポジトリ(`photos.git`)から、全refの履�
 - 処理完了したrefを `save_status.txt` に1行1refで追加
 - 形式: `<sha1> <ref名>`
 - 差分実行: save_status.txtに記録されているsha1以降のコミットのみ処理
-- **重要**: save_status.txtの更新は全処理完了後に行い、中断時の正確再開を確保
+- **重要**: save_status.txtの更新は1つのrefの全処理完了後に行い、中断時の正確再開を確保
+
+### 10. OID重複スキップ
+- 起動時に `save/` ディレクトリから既存のOIDを読み込み
+- 処理時にスキップ判定を行い、重複ダウンロード・EXIF抽出を回避
 
 ## ファイル構成
 ```
@@ -63,4 +69,4 @@ extract_exif_from_git_repository.mjs  - メインスクリプト (独立実装)
 - Gitea LFS APIへHTTP GETで直接OID指定して取得する方式
 - 画像ファイル判定は拡張子ベースで実装
 - 大量ファイル対応のため、バッチ単位で並列処理し逐次保存
-- 処理済みOIDはメモリ上で管理し、重複処理をスキップ
+- 処理済みOIDはsave/ディレクトリから読み込みメモリ上で管理し、重複処理をスキップ

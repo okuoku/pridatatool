@@ -12,8 +12,8 @@
 
 ### 1. 初期化
 - `save/` ディレクトリ内の全JSONファイルを走査
-- `db_status.txt` を読み込み、処理済みOID一覧を取得 (差分実行対応)
-- SQLite DB初期化: `db.sqlite` テーブル作成
+- SQLite DB初期化: `db.sqlite` テーブル作成 (既存テーブルが存在する場合はそのまま使用)
+- DBをクエリして既に保存されているOID一覧を取得 (差分実行対応)
 
 ### 2. テーブル設計
 ```sql
@@ -58,8 +58,7 @@ decimal = degrees + (minutes / 60) + (seconds / 3600)
 - カメラ情報 (`Make`, `Model`)
 
 ### 6. 進捗管理
-- 処理完了したOIDを `db_status.txt` に追加 (1行1OID)
-- 差分実行: 未処理のOIDのみDBに追加
+- 差分実行: DBに存在しないOIDのみ処理
 
 ### 7. 実行エラー処理
 - JSONパースエラー: スキップしてログ出力
@@ -70,7 +69,6 @@ decimal = degrees + (minutes / 60) + (seconds / 3600)
 ```
 save_to_sqlite.py  - メインスクリプト
 db.sqlite         - 出力DB
-db_status.txt     - 処理済みOIDリスト
 ```
 
 ## 実装メモ

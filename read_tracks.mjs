@@ -295,21 +295,19 @@ function computeTrackId(basename) {
     return crypto.createHash("sha256").update("pritrack" + basename).digest("hex");
 }
 
-function extractDateFromContent(content, ext) {
-    if (ext === ".txt") {
-        const match = content.match(/(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
-        if (match) {
-            return match[1];
-        }
-    } else if (ext === ".gpx") {
-        const match = content.match(/<time>(\d{4}-\d{2}-\d{2})T/);
-        if (match) {
-            return match[1];
-        }
-    } else if (ext === ".kml") {
-        const match = content.match(/<when>(\d{4}-\d{2}-\d{2})T/);
-        if (match) {
-            return match[1];
+function getEarliestDate(points, ext) {
+    if (!points || points.length === 0) return null;
+    
+    for (const point of points) {
+        if (!point || !point[0]) continue;
+        
+        const timeStr = point[0];
+        if (ext === ".txt") {
+            const match = timeStr.match(/(\d{4}-\d{2}-\d{2})/);
+            if (match) return match[1];
+        } else if (ext === ".gpx" || ext === ".kml") {
+            const match = timeStr.match(/(\d{4}-\d{2}-\d{2})T/);
+            if (match) return match[1];
         }
     }
     return null;
@@ -516,7 +514,7 @@ async function processTrackFile(args) {
         const points = parseTrack(content, ext);
         if (points.length === 0) return null;
 
-        const date = extractDateFromContent(content, ext);
+        const date = getEarliestDate(points, ext);
         const segmentIds = [];
 
         for (let i = 0; i < points.length; i += SEGMENT_SIZE) {
@@ -534,8 +532,13 @@ async function processTrackFile(args) {
         const trackData = {
             filename: file,
             ident: trackId,
+            commit: commit,
             segments: segmentIds
         };
+
+        if (date) {
+            trackData.date = date;
+        }
 
         await saveTrack(trackId, trackData);
         processedTrackIds.add(trackId);

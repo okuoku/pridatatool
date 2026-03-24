@@ -4,6 +4,8 @@ import process from "node:process";
 import crypto from "node:crypto";
 import child_process from "child_process";
 import { createRequire } from "node:module";
+import https from "node:https";
+import http from "node:http";
 
 const require = createRequire(import.meta.url);
 const OpenLocationCode = require("./openlocationcode.js");
@@ -252,18 +254,41 @@ async function getLfsPointerContent(reader, commit, filePath) {
 async function downloadLfsFile(gitea_host, token, oid) {
     const url = `${gitea_host}/info/lfs/objects/${oid}`;
 
-    const response = await fetch(url, {
-        headers: {
-            "Authorization": `Bearer ${token}`
-        }
+    return new Promise((resolve, reject) => {
+        const urlObj = new URL(url);
+        const protocol = urlObj.protocol === "https:" ? https : http;
+
+        const options = {
+            hostname: urlObj.hostname,
+            port: urlObj.port,
+            path: urlObj.pathname,
+            method: "GET",
+            headers: {
+                "Authorization": `Bearer ${token}`
+            }
+        };
+
+        const req = protocol.request(options, (res) => {
+            if (res.statusCode !== 200) {
+                console.error(`Failed to download LFS file ${oid}: ${res.statusCode} ${urlObj}`);
+                resolve(null);
+                return;
+            }
+
+            const chunks = [];
+            res.on("data", (chunk) => chunks.push(chunk));
+            res.on("end", () => {
+                resolve(Buffer.concat(chunks));
+            });
+        });
+
+        req.on("error", (err) => {
+            console.error(`Failed to download LFS file ${oid}: ${err.message}`);
+            resolve(null);
+        });
+
+        req.end();
     });
-
-    if (!response.ok) {
-        console.error(`Failed to download LFS file ${oid}: ${response.status}`);
-        return null;
-    }
-
-    return await response.arrayBuffer();
 }
 
 function computeTrackId(basename) {

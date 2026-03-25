@@ -10,8 +10,40 @@ import http from "node:http";
 const require = createRequire(import.meta.url);
 const OpenLocationCode = require("./openlocationcode.js");
 
-const TRACK_EXTENSIONS = [".txt", ".gpx", ".kml"];
-const PRIORITY_EXT = { ".txt": 0, ".gpx": 1, ".kml": 2 };
+function runPython(content, ext) {
+    return new Promise((resolve, reject) => {
+        const py = child_process.spawn("python3", ["track2json.py", "-"], {
+            stdio: ["pipe", "pipe", "pipe"]
+        });
+
+        let stdout = "";
+        let stderr = "";
+
+        py.stdout.on("data", (data) => { stdout += data.toString(); });
+        py.stderr.on("data", (data) => { stderr += data.toString(); });
+
+        py.on("close", (code) => {
+            if (code !== 0) {
+                reject(new Error(`Python script failed: ${stderr}`));
+                return;
+            }
+            try {
+                const parsed = JSON.parse(stdout);
+                resolve(parsed);
+            } catch (e) {
+                reject(new Error(`Failed to parse Python output: ${e.message}, stdout: ${stdout}`));
+            }
+        });
+
+        py.on("error", (e) => { reject(e); });
+
+        py.stdin.write(content);
+        py.stdin.end();
+    });
+}
+
+const TRACK_EXTENSIONS = [".txt", ".gpx"];
+const PRIORITY_EXT = { ".txt": 0, ".gpx": 1 };
 
 const CONCURRENCY = 16;
 const WORKER_COUNT = 4;
@@ -43,7 +75,7 @@ async function getToken(tokenArg) {
 
 async function rungit(cmd, gitdir) {
     return new Promise((resolve, reject) => {
-        child_process.execFile("git", cmd, { cwd: gitdir }, (err, stdout, stderr) => {
+        child_process.execFile("git", cmd, { cwd: gitdir, maxBuffer: 1024 * 1024 * 100 }, (err, stdout, stderr) => {
             if (err) reject(err);
             else resolve(stdout.trim());
         });
@@ -305,138 +337,12 @@ function getEarliestDate(points, ext) {
         if (ext === ".txt") {
             const match = timeStr.match(/(\d{4}-\d{2}-\d{2})/);
             if (match) return match[1];
-        } else if (ext === ".gpx" || ext === ".kml") {
+        } else if (ext === ".gpx") {
             const match = timeStr.match(/(\d{4}-\d{2}-\d{2})T/);
             if (match) return match[1];
         }
     }
     return null;
-}
-
-function parseTxt(content) {
-    const lines = content.split("\n").map(l => l.trim()).filter(l => l);
-    if (lines.length < 2) return [];
-
-    const headers = lines[0].split(",").map(h => h.trim().toLowerCase());
-    const points = [];
-
-    for (let i = 1; i < lines.length; i++) {
-        const values = lines[i].split(",").map(v => v.trim());
-        const row = {};
-        headers.forEach((h, idx) => {
-            row[h] = values[idx] || "";
-        });
-
-        const lat = parseFloat(row["latitude(deg)"]);
-        const lon = parseFloat(row["longitude(deg)"]);
-        if (isNaN(lat) || isNaN(lon)) continue;
-
-        const point = [
-            row["time"],
-            lon.toString(),
-            lat.toString()
-        ];
-
-        const speed = row["speed(m/s)"];
-        if (speed) point.push(speed);
-
-        const alt = row["altitude(m)"];
-        if (alt) point.push(alt);
-
-        const satUsed = row["sat_used"];
-        if (satUsed) point.push(parseInt(satUsed) || null);
-
-        const satInview = row["sat_inview"];
-        if (satInview) point.push(parseInt(satInview) || null);
-
-        const acc = row["accuracy(m)"];
-        if (acc) point.push(acc);
-
-        const bearing = row["bearing(deg)"];
-        if (bearing) point.push(bearing);
-
-        while (point.length > 3 && point[point.length - 1] === null) {
-            point.pop();
-        }
-
-        points.push(point);
-    }
-
-    return points;
-}
-
-function parseGpx(content) {
-    const points = [];
-    const timeMatch = content.match(/<trkpt[^>]*>([\s\S]*?)<\/trkpt>/g) || [];
-
-    for (const trkpt of timeMatch) {
-        const latMatch = trkpt.match(/lat="([^"]+)"/);
-        const lonMatch = trkpt.match(/lon="([^"]+)"/);
-        if (!latMatch || !lonMatch) continue;
-
-        const lat = latMatch[1];
-        const lon = lonMatch[1];
-
-        const point = [null, lon, lat];
-
-        const timeMatch2 = trkpt.match(/<time>([^<]+)<\/time>/);
-        if (timeMatch2) point[0] = timeMatch2[1];
-
-        const eleMatch = trkpt.match(/<ele>([^<]+)<\/ele>/);
-        if (eleMatch) point.push(eleMatch[1]);
-
-        const speedMatch = trkpt.match(/<speed>([^<]+)<\/speed>/);
-        if (speedMatch) point.push(speedMatch[1]);
-
-        const satMatch = trkpt.match(/<sat>(\d+)<\/sat>/);
-        if (satMatch) point.push(parseInt(satMatch[1]));
-
-        while (point.length > 3 && point[point.length - 1] === null) {
-            point.pop();
-        }
-
-        points.push(point);
-    }
-
-    return points;
-}
-
-function parseKml(content) {
-    const points = [];
-    const whenMatch = content.match(/<when>([^<]+)<\/when>/g) || [];
-
-    for (let i = 0; i < whenMatch.length; i++) {
-        const timeStr = whenMatch[i].replace(/<when>|<\/when>/g, "");
-
-        const coordMatch = content.match(/<gx:coord>([^<]+)<\/gx:coord>/);
-        if (!coordMatch) continue;
-
-        const coords = coordMatch[1].trim().split(/\s+/);
-        if (coords.length < 2) continue;
-
-        const point = [
-            timeStr,
-            coords[0],
-            coords[1]
-        ];
-
-        if (coords.length >= 3) point.push(coords[2]);
-
-        while (point.length > 3 && point[point.length - 1] === null) {
-            point.pop();
-        }
-
-        points.push(point);
-    }
-
-    return points;
-}
-
-function parseTrack(content, ext) {
-    if (ext === ".txt") return parseTxt(content);
-    if (ext === ".gpx") return parseGpx(content);
-    if (ext === ".kml") return parseKml(content);
-    return [];
 }
 
 function computePlusCode(lat, lon) {
@@ -511,7 +417,7 @@ async function processTrackFile(args) {
             oid = crypto.createHash("sha256").update(blob).digest("hex");
         }
 
-        const points = parseTrack(content, ext);
+        const points = await runPython(content, ext);
         if (points.length === 0) return null;
 
         const date = getEarliestDate(points, ext);

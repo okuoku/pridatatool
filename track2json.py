@@ -5,19 +5,24 @@ import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-GPX_NS = {"gpx": "http://www.topografix.com/GPX/1/0"}
+
+def detect_gpx_ns(root):
+    if root.tag.startswith("{"):
+        return {"gpx": root.tag[1 : root.tag.index("}")]}
+    return {"gpx": "http://www.topografix.com/GPX/1/0"}
 
 
 def parse_gpx(filepath):
     tree = ET.parse(filepath)
     root = tree.getroot()
+    ns = detect_gpx_ns(root)
 
     results = []
-    for trkpt in root.findall(".//gpx:trkpt", GPX_NS):
-        time_elem = trkpt.find("gpx:time", GPX_NS)
-        ele_elem = trkpt.find("gpx:ele", GPX_NS)
-        speed_elem = trkpt.find("gpx:speed", GPX_NS)
-        sat_elem = trkpt.find("gpx:sat", GPX_NS)
+    for trkpt in root.findall(".//gpx:trkpt", ns):
+        time_elem = trkpt.find("gpx:time", ns)
+        ele_elem = trkpt.find("gpx:ele", ns)
+        speed_elem = trkpt.find("gpx:speed", ns)
+        sat_elem = trkpt.find("gpx:sat", ns)
 
         entry = [
             time_elem.text if time_elem is not None else None,

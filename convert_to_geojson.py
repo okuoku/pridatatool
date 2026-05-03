@@ -45,6 +45,7 @@ def fetch_photos(conn, start_date=None, end_date=None, camera=None):
 
 def convert_to_geojson(photos):
     features = []
+    seen_coords = set()
 
     for row in photos:
         (
@@ -60,6 +61,11 @@ def convert_to_geojson(photos):
 
         if not is_valid_coord(latitude, longitude):
             continue
+
+        coords = (float(latitude), float(longitude))
+        if coords in seen_coords:
+            continue
+        seen_coords.add(coords)
 
         feature = {
             "type": "Feature",

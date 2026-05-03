@@ -6,7 +6,6 @@ import child_process from "child_process";
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".heic", ".raw", ".cr2", ".nef", ".arw", ".dng", ".orf", ".rw2"]);
 
-const STATUS_FILE = "save_status.txt";
 const SAVE_DIR = "save";
 const CONCURRENCY = 16;
 const EXIF_WORKER_COUNT = 8;
@@ -42,7 +41,7 @@ function parseArgs(){
 
 async function rungit(cmd, gitdir){
     return new Promise((resolve, reject) => {
-        child_process.execFile("git", cmd, { cwd: gitdir }, (err, stdout, stderr) => {
+        child_process.execFile("git", cmd, { cwd: gitdir, maxBuffer: 1024 * 1024 * 100 }, (err, stdout, stderr) => {
             if(err){
                 reject(err);
             }else{
@@ -276,29 +275,6 @@ function isImageFile(filename){
     return IMAGE_EXTENSIONS.has(ext);
 }
 
-async function loadProcessedRefs(){
-    try{
-        const content = await fs.readFile(STATUS_FILE, "utf8");
-        const processed = new Map();
-        for(const line of content.split("\n")){
-            const trimmed = line.trim();
-            if(!trimmed) continue;
-            const [sha1, ...refParts] = trimmed.split(" ");
-            const ref = refParts.join(" ");
-            if(sha1 && ref){
-                processed.set(ref, sha1);
-            }
-        }
-        return processed;
-    }catch{
-        return new Map();
-    }
-}
-
-async function saveProcessedRef(ref, sha1){
-    await fs.appendFile(STATUS_FILE, `${sha1} ${ref}\n`, "utf8");
-}
-
 async function loadProcessedOids(){
     const processedOids = new Set();
     try{
@@ -379,8 +355,8 @@ async function walkTree(gitdir, commit, prefix = ""){
     const results = [];
     
     try{
-        const output = await rungit(["ls-tree", "-r", "--name-only", commit, prefix || "."], gitdir);
-        const files = output.split("\n").filter(e => e.trim());
+        const output = await rungit(["ls-tree", "-r", "--name-only", "-z", commit, prefix || "."], gitdir);
+        const files = output.split("\0").filter(e => e.trim());
         
         for(const file of files){
             if(isImageFile(file)){
@@ -407,18 +383,14 @@ async function getAllRefs(gitdir){
     return refs;
 }
 
-async function getCommitHistory(gitdir, ref, baseCommit, sinceSha1){
+async function getCommitHistory(gitdir, ref, baseCommit){
     try{
         let output;
-        if(sinceSha1){
-            output = await rungit(["rev-list", baseCommit, "^" + sinceSha1, "--format=%H"], gitdir);
-        }else{
-            output = await rungit(["rev-list", baseCommit, "--format=%H"], gitdir);
-        }
+        output = await rungit(["rev-list", baseCommit, "--format=%H"], gitdir);
         const commits = output.split("\n").filter(e => e.match(/^[0-9a-f]{40}$/));
         return commits;
-    }catch{
-        return [baseCommit];
+    }catch (e) {
+        throw e;
     }
 }
 
@@ -484,16 +456,18 @@ async function processFilesParallel(gitdir, commit, files, readerPool, exifWorke
         const processed = batchResults.filter(r => r?.processed).length;
         const skipped = batchResults.filter(r => r?.skipped).length;
         const errors = batchResults.filter(r => r?.error).length;
-        console.log(`  Progress: ${i + batch.length}/${files.length} (processed: ${processed}, skipped: ${skipped}, errors: ${errors})`);
+        if(batch.length != skipped){
+            console.log(`  Progress: ${i + batch.length}/${files.length} (processed: ${processed}, skipped: ${skipped}, errors: ${errors})`);
+        }
     }
     
     return results;
 }
 
-async function processRef(gitdir, ref, commit, readerPool, exifWorkerPool, gitea_host, token, processedOids, lastProcessedSha1){
+async function processRef(gitdir, ref, commit, readerPool, exifWorkerPool, gitea_host, token, processedOids){
     console.log(`Processing ref: ${ref} (${commit})`);
     
-    const commits = await getCommitHistory(gitdir, ref, commit, lastProcessedSha1);
+    const commits = await getCommitHistory(gitdir, ref, commit);
     console.log(`Found ${commits.length} commits to process`);
     
     if(commits.length === 0){
@@ -504,10 +478,9 @@ async function processRef(gitdir, ref, commit, readerPool, exifWorkerPool, gitea
     let totalProcessed = 0;
     let totalSkipped = 0;
     let totalErrors = 0;
-    let lastSha1 = lastProcessedSha1 || "";
     
     for(const commitHash of commits){
-        console.log(`  Processing commit: ${commitHash}`);
+        //console.log(`  Processing commit: ${commitHash}`);
         
         const files = await walkTree(gitdir, commitHash);
         
@@ -516,15 +489,11 @@ async function processRef(gitdir, ref, commit, readerPool, exifWorkerPool, gitea
         totalProcessed += results.filter(r => r?.processed).length;
         totalSkipped += results.filter(r => r?.skipped).length;
         totalErrors += results.filter(r => r?.error).length;
-        
-        lastSha1 = commitHash;
     }
     
-    console.log(`  Ref complete: processed: ${totalProcessed}, skipped: ${totalSkipped}, errors: ${totalErrors}`);
+    console.log(`  Ref (${ref}, ${commit}) complete: processed: ${totalProcessed}, skipped: ${totalSkipped}, errors: ${totalErrors}`);
     
-    await saveProcessedRef(ref, lastSha1);
-    
-    return lastSha1;
+    return;
 }
 
 async function main(){
@@ -535,24 +504,18 @@ async function main(){
     const readerPool = make_reader_pool(gitdir, CONCURRENCY);
     const exifWorkerPool = make_exif_worker_pool(EXIF_WORKER_COUNT);
     const refs = await getAllRefs(gitdir);
-    const processedRefs = await loadProcessedRefs();
     const processedOids = await loadProcessedOids();
     
     console.log(`Found ${Object.keys(refs).length} refs`);
-    console.log(`Already processed: ${processedRefs.size} refs, ${processedOids.size} OIDs`);
     
     for(const [ref, commit] of Object.entries(refs)){
-        const lastProcessedSha1 = processedRefs.get(ref);
-        if(lastProcessedSha1){
-            console.log(`Skipping already processed ref: ${ref} (up to ${lastProcessedSha1})`);
-            continue;
-        }
-        
-        await processRef(gitdir, ref, commit, readerPool, exifWorkerPool, gitea_host, token, processedOids, null);
+        await processRef(gitdir, ref, commit, readerPool, exifWorkerPool, gitea_host, token, processedOids);
     }
     
     await readerPool.dispose();
     exifWorkerPool.dispose();
+
+    console.log(refs);
     
     console.log("Done!");
 }
